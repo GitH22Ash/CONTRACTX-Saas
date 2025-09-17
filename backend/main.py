@@ -1,7 +1,7 @@
 import os
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordRequestForm # <-- IMPORT IT HERE
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from uuid import UUID, uuid4
@@ -14,17 +14,21 @@ load_dotenv()
 import auth
 import models
 import schemas
-from database import engine, get_db
+from database import SessionLocal, engine, get_db
 
-# Create all database tables
-models.Base.metadata.create_all(bind=engine)
+# This line is problematic for production and should be removed or commented out.
+# We will create tables manually or with a migration tool.
+# models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI()
+app = FastAPI(title="Contract AI API", version="1.0")
 
 # --- CORS Middleware ---
+# This allows your frontend to communicate with your backend
 origins = [
-    "http://localhost",
     "http://localhost:5173",
+    "http://localhost:3000",
+    # Add your deployed Netlify URL here once you have it
+    # e.g., "https://your-app-name.netlify.app"
 ]
 
 app.add_middleware(
@@ -35,13 +39,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Dependency Injection for Auth ---
-app.dependency_overrides[auth.get_db_from_context] = get_db
-
-
 # --- API Endpoints ---
 
-@app.post("/signup", response_model=schemas.User)
+@app.post("/signup", response_model=schemas.User, status_code=201)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
     if db_user:
@@ -56,120 +56,132 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     return new_user
 
 @app.post("/login", response_model=schemas.Token)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)): # <-- CORRECT USAGE
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = auth.authenticate_user(db, username=form_data.username, password=form_data.password)
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=401,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    access_token_expires = datetime.timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
-        data={"sub": user.username, "user_id": str(user.id)}
+        data={"sub": str(user.id)}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
-
 
 @app.post("/upload")
 async def upload_contract(
     file: UploadFile = File(...),
-    expiry_date: datetime.date = Form(...),
     parties: str = Form(...),
+    expiry_date: date = Form(...),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Mock LlamaCloud Parsing
-    mock_parsing_response = {
-      "document_id": str(uuid4()),
-      "chunks": [
-        {
-          "chunk_id": "c1",
-          "text": f"Termination clause for {file.filename}: Either party may terminate with 90 days’ notice.",
-          "embedding": [0.12, -0.45, 0.91, 0.33],
-          "metadata": { "page": 2, "contract_name": file.filename, "clause_title": "Termination" }
-        },
-        {
-          "chunk_id": "c2",
-          "text": f"Liability cap for {file.filename}: Limited to 12 months’ fees.",
-          "embedding": [0.01, 0.22, -0.87, 0.44],
-          "metadata": { "page": 5, "contract_name": file.filename, "clause_title": "Liability" }
-        }
-      ]
-    }
-
-    # Store document metadata
+    # Mock LlamaCloud parsing
+    doc_id = uuid4()
+    
+    # 1. Create the Document record
     new_document = models.Document(
-        id=UUID(mock_parsing_response["document_id"]),
+        id=doc_id,
         user_id=current_user.id,
         filename=file.filename,
+        uploaded_on=datetime.date.today(),
         expiry_date=expiry_date,
         parties=parties,
-        status="Active",
-        risk_score="Low",
-        uploaded_on=datetime.date.today()
+        status="Active",  # Mock status
+        risk_score="Low" # Mock risk score
     )
     db.add(new_document)
     db.commit()
     db.refresh(new_document)
 
-    # Store chunks
-    for chunk_data in mock_parsing_response["chunks"]:
+    # 2. Mock parsing and create Chunk records
+    mock_chunks = [
+        {
+            "chunk_id": "c1",
+            "text": "Termination clause: Either party may terminate with 90 days’ notice.",
+            "embedding": [0.12, -0.45, 0.91, 0.33],
+            "metadata": {"page": 2, "contract_name": file.filename, "clause_title": "Termination"}
+        },
+        {
+            "chunk_id": "c2",
+            "text": "Liability cap: Limited to 12 months’ fees.",
+            "embedding": [0.01, 0.22, -0.87, 0.44],
+            "metadata": {"page": 5, "contract_name": file.filename, "clause_title": "Limitation of Liability"}
+        }
+    ]
+
+    for chunk_data in mock_chunks:
         new_chunk = models.Chunk(
             id=uuid4(),
-            doc_id=new_document.id,
+            doc_id=doc_id,
             user_id=current_user.id,
             text_chunk=chunk_data["text"],
             embedding=chunk_data["embedding"],
             chunk_metadata=chunk_data["metadata"]
         )
         db.add(new_chunk)
-    
+
     db.commit()
 
-    return {"filename": file.filename, "doc_id": new_document.id, "chunks_saved": len(mock_parsing_response["chunks"])}
-
+    return {"filename": file.filename, "doc_id": doc_id, "status": "processed"}
 
 @app.get("/contracts", response_model=List[schemas.Document])
-def get_contracts(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    return db.query(models.Document).filter(models.Document.user_id == current_user.id).all()
-
+def get_user_contracts(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    contracts = db.query(models.Document).filter(models.Document.user_id == current_user.id).all()
+    return contracts
 
 @app.get("/contracts/{doc_id}", response_model=schemas.DocumentDetail)
-def get_contract_details(doc_id: UUID, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+def get_contract_details(
+    doc_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
     document = db.query(models.Document).filter(models.Document.id == doc_id, models.Document.user_id == current_user.id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
     chunks = db.query(models.Chunk).filter(models.Chunk.doc_id == doc_id).all()
     
+    # Mock insights
     mock_insights = [
-        {"id": "risk1", "type": "risk", "text": "The termination clause allows for termination with a relatively short notice period of 90 days."},
-        {"id": "rec1", "type": "recommendation", "text": "Consider negotiating a longer notice period for termination to ensure business continuity."},
-        {"id": "risk2", "type": "risk", "text": "Liability is capped at 12 months' fees, which may not cover all potential damages in a major breach."}
+        {"id": "ins1", "type": "risk", "text": "The 90-day termination notice is standard but could be shorter."},
+        {"id": "ins2", "type": "recommendation", "text": "Consider adding a clause for termination for cause with a shorter notice period."}
     ]
 
     return {
-        "id": document.id,
-        "filename": document.filename,
-        "uploaded_on": document.uploaded_on,
-        "expiry_date": document.expiry_date,
-        "status": document.status,
-        "risk_score": document.risk_score,
-        "parties": document.parties,
+        **document.__dict__,
         "clauses": chunks,
         "insights": mock_insights
     }
 
 @app.post("/ask")
 def ask_question(question: schemas.Question, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    mock_query_embedding = [0.10, -0.40, 0.95, 0.30]
-    
-    relevant_chunks = db.query(models.Chunk).filter(models.Chunk.user_id == current_user.id).order_by(models.Chunk.embedding.l2_distance(mock_query_embedding)).limit(3).all()
+    # Mock RAG workflow
+    # 1. Embed query (mocked)
+    query_embedding = [0.1, 0.2, 0.3, 0.4]
 
-    mock_answer = "Based on the retrieved documents, the contract can be terminated by either party with a 90 days' notice. The liability is capped at a sum equivalent to 12 months' fees."
+    # 2. Vector search (this is a simplified example)
+    # In a real app, you would use pgvector's cosine distance operator
+    from sqlalchemy import text
+    
+    # IMPORTANT: This is a simplified search and not a true vector search.
+    # A real implementation would use something like:
+    # result = db.execute(text("SELECT id, text_chunk, chunk_metadata FROM chunks ORDER BY embedding <-> :query_embedding LIMIT 5"), 
+    #                     {"query_embedding": str(query_embedding)})
+    # For now, we'll just return the first few chunks for this user.
+    
+    retrieved_chunks = db.query(models.Chunk).filter(models.Chunk.user_id == current_user.id).limit(3).all()
+
+    # 3. Mock AI answer
+    mock_answer = "Based on the retrieved documents, the termination clause generally requires a 90-day notice. However, liability is capped at 12 months of fees."
 
     return {
         "answer": mock_answer,
-        "retrieved_chunks": relevant_chunks
+        "retrieved_chunks": retrieved_chunks
     }
 
