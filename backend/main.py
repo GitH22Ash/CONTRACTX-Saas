@@ -26,7 +26,7 @@ app = FastAPI(title="Contract AI API", version="1.0")
 # This allows your frontend to communicate with your backend
 origins = [
     "http://localhost:5173",
-    "http://localhost:3000",
+    "https://contractx-saas.netlify.app/",
     # Add your deployed Netlify URL here once you have it
     # e.g., "https://your-app-name.netlify.app"
 ]
