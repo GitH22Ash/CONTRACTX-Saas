@@ -38,7 +38,7 @@ const useAuth = () => useContext(AuthContext);
 // --- API SERVICE ---
 // For development, we'll hardcode the URL to avoid build tool-specific issues.
 // For deployment, this would be replaced with a proper environment variable.
-const API_URL = 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const api = {
     async request(endpoint, options = {}) {
