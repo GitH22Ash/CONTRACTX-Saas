@@ -1,12 +1,12 @@
 import os
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
-from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from uuid import UUID, uuid4
-from datetime import date, timedelta  # Corrected import to include 'date'
+from datetime import date
 from dotenv import load_dotenv
+from fastapi.security import OAuth2PasswordRequestForm
 
 # Load environment variables from .env file
 load_dotenv()
@@ -16,18 +16,15 @@ import models
 import schemas
 from database import SessionLocal, engine, get_db
 
-# This line is problematic for production and should be removed or commented out.
-# We will create tables manually or with a migration tool.
+# This line is commented out for production deployment
 # models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Contract AI API", version="1.0")
 
 # --- CORS Middleware ---
 # This allows your frontend to communicate with your backend
-origins = [
-    "http://localhost:5173",
-    "https://contractx-saas.netlify.app",
-]
+# Using "*" is acceptable for a prototype/demo project.
+origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +36,7 @@ app.add_middleware(
 
 # --- API Endpoints ---
 
-@app.post("/signup", response_model=schemas.User, status_code=201)
+@app.post("/signup", response_model=schemas.User)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
     if db_user:
@@ -62,10 +59,7 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = auth.create_access_token(
-        data={"sub": str(user.id)}, expires_delta=access_token_expires
-    )
+    access_token = auth.create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/upload")
@@ -77,82 +71,83 @@ async def upload_contract(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     # Mock LlamaCloud parsing
-    doc_id = uuid4()
+    # In a real app, you would send the file content to a parsing service
+    # Here, we just create mock chunks.
     
-    # 1. Create the Document record
-    new_document = models.Document(
-        id=doc_id,
+    # 1. Create and save the document metadata
+    new_doc = models.Document(
+        id=uuid4(),
         user_id=current_user.id,
         filename=file.filename,
-        uploaded_on=date.today(),
-        expiry_date=expiry_date,
         parties=parties,
-        status="Active",  # Mock status
+        expiry_date=expiry_date,
+        status="Active", # Mock status
         risk_score="Low" # Mock risk score
     )
-    db.add(new_document)
+    db.add(new_doc)
     db.commit()
-    db.refresh(new_document)
+    db.refresh(new_doc)
 
-    # 2. Mock parsing and create Chunk records
-    mock_chunks = [
-        {
-            "chunk_id": "c1",
-            "text": "Termination clause: Either party may terminate with 90 days’ notice.",
-            "embedding": [0.12, -0.45, 0.91, 0.33],
-            "metadata": {"page": 2, "contract_name": file.filename, "clause_title": "Termination"}
-        },
-        {
-            "chunk_id": "c2",
-            "text": "Liability cap: Limited to 12 months’ fees.",
-            "embedding": [0.01, 0.22, -0.87, 0.44],
-            "metadata": {"page": 5, "contract_name": file.filename, "clause_title": "Limitation of Liability"}
-        }
-    ]
+    # 2. Mock LlamaCloud response and save chunks
+    mock_llama_response = {
+        "document_id": str(new_doc.id),
+        "chunks": [
+            {
+                "chunk_id": "c1",
+                "text": f"Termination clause for {file.filename}: Either party may terminate with 90 days’ notice.",
+                "embedding": [0.12, -0.45, 0.91, 0.33],
+                "metadata": { "page": 2, "contract_name": file.filename, "clause_title": "Termination" }
+            },
+            {
+                "chunk_id": "c2",
+                "text": f"Liability cap from {file.filename}: Limited to 12 months’ fees.",
+                "embedding": [0.01, 0.22, -0.87, 0.44],
+                "metadata": { "page": 5, "contract_name": file.filename, "clause_title": "Liability" }
+            }
+        ]
+    }
 
-    for chunk_data in mock_chunks:
+    for chunk_data in mock_llama_response["chunks"]:
         new_chunk = models.Chunk(
             id=uuid4(),
-            doc_id=doc_id,
+            doc_id=new_doc.id,
             user_id=current_user.id,
             text_chunk=chunk_data["text"],
             embedding=chunk_data["embedding"],
             chunk_metadata=chunk_data["metadata"]
         )
         db.add(new_chunk)
-
+    
     db.commit()
 
-    return {"filename": file.filename, "doc_id": doc_id, "status": "processed"}
+    return {"filename": file.filename, "doc_id": new_doc.id, "status": "processed"}
 
 @app.get("/contracts", response_model=List[schemas.Document])
-def get_user_contracts(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
+def get_contracts(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     contracts = db.query(models.Document).filter(models.Document.user_id == current_user.id).all()
     return contracts
 
 @app.get("/contracts/{doc_id}", response_model=schemas.DocumentDetail)
-def get_contract_details(
-    doc_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
+def get_contract_details(doc_id: UUID, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     document = db.query(models.Document).filter(models.Document.id == doc_id, models.Document.user_id == current_user.id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-
+    
     chunks = db.query(models.Chunk).filter(models.Chunk.doc_id == doc_id).all()
     
     # Mock insights
     mock_insights = [
-        {"id": "ins1", "type": "risk", "text": "The 90-day termination notice is standard but could be shorter."},
-        {"id": "ins2", "type": "recommendation", "text": "Consider adding a clause for termination for cause with a shorter notice period."}
+        {"id": 1, "type": "risk", "text": "Termination notice period is longer than standard."},
+        {"id": 2, "type": "recommendation", "text": "Consider negotiating a liability cap based on annual fees."}
     ]
 
     return {
-        **document.__dict__,
+        "id": document.id,
+        "filename": document.filename,
+        "parties": document.parties,
+        "expiry_date": document.expiry_date,
+        "status": document.status,
+        "risk_score": document.risk_score,
         "clauses": chunks,
         "insights": mock_insights
     }
@@ -160,23 +155,16 @@ def get_contract_details(
 @app.post("/ask")
 def ask_question(question: schemas.Question, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     # Mock RAG workflow
-    # 1. Embed query (mocked)
-    query_embedding = [0.1, 0.2, 0.3, 0.4]
+    # 1. Embed the user's question (mocked)
+    mock_query_embedding = [0.1, 0.2, 0.3, 0.4]
 
-    # 2. Vector search (this is a simplified example)
-    # In a real app, you would use pgvector's cosine distance operator
-    from sqlalchemy import text
+    # 2. Perform vector search in Postgres (mocked)
+    # In a real app, you would use a SQL query with pgvector's cosine distance/similarity operator
+    # e.g., SELECT *, 1 - (embedding <=> '[0.1,0.2,...]') AS similarity FROM chunks WHERE user_id = ... ORDER BY similarity DESC LIMIT 5
+    retrieved_chunks = db.query(models.Chunk).filter(models.Chunk.user_id == current_user.id).limit(2).all()
     
-    # IMPORTANT: This is a simplified search and not a true vector search.
-    # A real implementation would use something like:
-    # result = db.execute(text("SELECT id, text_chunk, chunk_metadata FROM chunks ORDER BY embedding <-> :query_embedding LIMIT 5"), 
-    #                     {"query_embedding": str(query_embedding)})
-    # For now, we'll just return the first few chunks for this user.
-    
-    retrieved_chunks = db.query(models.Chunk).filter(models.Chunk.user_id == current_user.id).limit(3).all()
-
-    # 3. Mock AI answer
-    mock_answer = "Based on the retrieved documents, the termination clause generally requires a 90-day notice. However, liability is capped at 12 months of fees."
+    # 3. Generate a mock answer
+    mock_answer = f"Based on the retrieved documents, the answer to '{question.question}' relates to termination and liability clauses. Please review the provided snippets for details."
 
     return {
         "answer": mock_answer,
