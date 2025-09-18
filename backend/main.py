@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from uuid import UUID, uuid4
-import datetime
+from datetime import date, timedelta  # Corrected import to include 'date'
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -64,7 +64,7 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    access_token_expires = datetime.timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
         data={"sub": str(user.id)}, expires_delta=access_token_expires
     )
@@ -86,7 +86,7 @@ async def upload_contract(
         id=doc_id,
         user_id=current_user.id,
         filename=file.filename,
-        uploaded_on=datetime.date.today(),
+        uploaded_on=date.today(),
         expiry_date=expiry_date,
         parties=parties,
         status="Active",  # Mock status
